@@ -1,6 +1,6 @@
 import os
 import psycopg2
-import re  # <--- NEW: Needed for the pattern matching
+import re
 from slack_bolt import App
 from slack_bolt.adapter.flask import SlackRequestHandler
 from flask import Flask, request
@@ -17,6 +17,10 @@ app = App(
 )
 flask_app = Flask(__name__)
 handler = SlackRequestHandler(app)
+
+# --- MEMORY CACHE ---
+# We store names here so we don't ask Slack 100 times: {'U123': 'Tim', 'U456': 'Sarah'}
+USER_CACHE = {}
 
 # --- DATABASE CONNECTION ---
 def get_db_connection():
@@ -65,6 +69,25 @@ def toggle_booking(day, room_index, user_id):
     conn.close()
     return result
 
+# --- HELPER: GET NAMES ---
+def get_user_name(user_id):
+    """Fetches user's first name from Slack, uses Cache for speed"""
+    if user_id in USER_CACHE:
+        return USER_CACHE[user_id]
+    
+    try:
+        # Call Slack API to get profile
+        result = app.client.users_info(user=user_id)
+        # Get first name (or display name)
+        name = result["user"]["profile"].get("first_name") or result["user"]["real_name"]
+        
+        # Save to cache so we remember it next time
+        USER_CACHE[user_id] = name
+        return name
+    except Exception as e:
+        print(f"Error fetching name for {user_id}: {e}")
+        return "Taken"
+
 # --- UI BUILDER ---
 def get_dashboard_blocks():
     all_bookings = get_weekly_bookings()
@@ -77,14 +100,19 @@ def get_dashboard_blocks():
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*{day}*"}})
         buttons = []
         for i, room_full_name in enumerate(ROOMS_DB):
-            user = all_bookings[day][room_full_name]
-            style = "danger" if user else "primary"
-            label = ROOMS_DISPLAY[i]
-            btn_text = f"{label} (X)" if user else label
-            val = f"{day}|{i}"
+            user_id = all_bookings[day][room_full_name]
             
-            # UNIQUE ID FIX: We append the day and index to make every button unique
-            # e.g., toggle_Monday_0, toggle_Monday_1, etc.
+            style = "primary" # Default Green
+            label = ROOMS_DISPLAY[i]
+            btn_text = label # Default "Small 1"
+            
+            if user_id:
+                style = "danger" # Red
+                # Fetch the name!
+                first_name = get_user_name(user_id)
+                btn_text = f"{label} ({first_name})"
+
+            val = f"{day}|{i}"
             unique_action_id = f"toggle_{day}_{i}"
             
             buttons.append({
@@ -109,12 +137,10 @@ def open_dashboard(ack, say):
     ack()
     say(blocks=get_dashboard_blocks(), text="Weekly Desk Dashboard")
 
-# REGEX LISTENER: This listens for ANY action_id that starts with "toggle_"
 @app.action(re.compile("toggle_.*"))
 def handle_click(ack, body, client):
     ack()
     user = body['user']['id']
-    # We still get the data we need from the 'value' field (Monday|0)
     day, room_idx_str = body['actions'][0]['value'].split("|")
     room_idx = int(room_idx_str)
     
@@ -142,7 +168,6 @@ def slack_events():
 def health():
     return "Dashboard Active", 200
 
-# Self-Healing DB Init
 if __name__ != "__main__":
     try:
         conn = get_db_connection()
