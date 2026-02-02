@@ -19,7 +19,6 @@ flask_app = Flask(__name__)
 handler = SlackRequestHandler(app)
 
 # --- MEMORY CACHE ---
-# We store names here so we don't ask Slack 100 times: {'U123': 'Tim', 'U456': 'Sarah'}
 USER_CACHE = {}
 
 # --- DATABASE CONNECTION ---
@@ -69,23 +68,26 @@ def toggle_booking(day, room_index, user_id):
     conn.close()
     return result
 
+def reset_db():
+    """Wipes all bookings for the new week"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM bookings;") # Deletes every row
+    conn.commit()
+    cur.close()
+    conn.close()
+
 # --- HELPER: GET NAMES ---
 def get_user_name(user_id):
-    """Fetches user's first name from Slack, uses Cache for speed"""
     if user_id in USER_CACHE:
         return USER_CACHE[user_id]
-    
     try:
-        # Call Slack API to get profile
         result = app.client.users_info(user=user_id)
-        # Get first name (or display name)
         name = result["user"]["profile"].get("first_name") or result["user"]["real_name"]
-        
-        # Save to cache so we remember it next time
         USER_CACHE[user_id] = name
         return name
     except Exception as e:
-        print(f"Error fetching name for {user_id}: {e}")
+        print(f"Error fetching name: {e}")
         return "Taken"
 
 # --- UI BUILDER ---
@@ -101,14 +103,12 @@ def get_dashboard_blocks():
         buttons = []
         for i, room_full_name in enumerate(ROOMS_DB):
             user_id = all_bookings[day][room_full_name]
-            
-            style = "primary" # Default Green
+            style = "primary"
             label = ROOMS_DISPLAY[i]
-            btn_text = label # Default "Small 1"
+            btn_text = label
             
             if user_id:
-                style = "danger" # Red
-                # Fetch the name!
+                style = "danger"
                 first_name = get_user_name(user_id)
                 btn_text = f"{label} ({first_name})"
 
@@ -133,8 +133,19 @@ def get_dashboard_blocks():
 
 # --- SLACK HANDLERS ---
 @app.command("/desk")
-def open_dashboard(ack, say):
+def open_dashboard(ack, say, command):
     ack()
+    
+    # CHECK FOR "SECRET" RESET WORD
+    user_text = command.get('text', '').lower().strip()
+    
+    if user_text == "new":
+        # 1. Wipe the database
+        reset_db()
+        # 2. Tell the user (privately or publicly)
+        say("🗑️ *Database Wiped!* Starting a fresh week.")
+        
+    # 3. Show the dashboard (It will be empty if you typed 'new')
     say(blocks=get_dashboard_blocks(), text="Weekly Desk Dashboard")
 
 @app.action(re.compile("toggle_.*"))
