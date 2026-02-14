@@ -1,11 +1,16 @@
 import os
 import psycopg2
 import re
+from datetime import datetime, timedelta
 from slack_bolt import App
 from slack_bolt.adapter.flask import SlackRequestHandler
 from flask import Flask, request
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # --- CONFIGURATION ---
+# 1. PASTE YOUR CHANNEL ID HERE (Right-click channel -> Copy Link -> Ends in C0xxxx)
+CHANNEL_ID = "C07GV929YRF" 
+
 ROOMS_DISPLAY = ["Small 1", "Small 2", "Large 1", "Large 2", "Large 3", "Large 4"]
 ROOMS_DB = ["Small Room 1", "Small Room 2", "Large Room 1", "Large Room 2", "Large Room 3", "Large Room 4"]
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
@@ -24,6 +29,36 @@ USER_CACHE = {}
 # --- DATABASE CONNECTION ---
 def get_db_connection():
     return psycopg2.connect(os.environ["DATABASE_URL"])
+
+# --- DATE LOGIC (NEW) ---
+def get_display_dates():
+    """
+    Calculates the dates for the dashboard.
+    - If today is Mon-Thu: Returns dates for THIS week.
+    - If today is Fri-Sun: Returns dates for NEXT week.
+    Returns a list of strings: ["Mon (Oct 9)", "Tue (Oct 10)", ...]
+    """
+    today = datetime.now()
+    current_weekday = today.weekday() # Mon=0, Sun=6
+    
+    # Calculate "Reference Monday"
+    # If Friday (4) or later, jump to next week's Monday. 
+    # Otherwise, go back to this week's Monday.
+    if current_weekday >= 4:
+        days_ahead = 7 - current_weekday
+    else:
+        days_ahead = 0 - current_weekday
+        
+    next_monday = today + timedelta(days=days_ahead)
+    
+    date_labels = []
+    for i in range(5):
+        future_day = next_monday + timedelta(days=i)
+        # Format: "Monday (Oct 9)"
+        label = f"{DAYS[i]} ({future_day.strftime('%b %d')})"
+        date_labels.append(label)
+        
+    return date_labels
 
 # --- DATABASE LOGIC ---
 def get_weekly_bookings():
@@ -69,10 +104,9 @@ def toggle_booking(day, room_index, user_id):
     return result
 
 def reset_db():
-    """Wipes all bookings for the new week"""
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("DELETE FROM bookings;") # Deletes every row
+    cur.execute("DELETE FROM bookings;") 
     conn.commit()
     cur.close()
     conn.close()
@@ -93,18 +127,23 @@ def get_user_name(user_id):
 # --- UI BUILDER ---
 def get_dashboard_blocks():
     all_bookings = get_weekly_bookings()
+    
+    # Get the smart dates
+    date_labels = get_display_dates()
+    
     blocks = [
         {"type": "header", "text": {"type": "plain_text", "text": "🗓️ Weekly Desk Dashboard"}},
         {"type": "divider"}
     ]
     
-    for day in DAYS:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*{day}*"}})
+    for i, day in enumerate(DAYS):
+        # Use the date label (e.g., "Monday (Oct 9)")
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*{date_labels[i]}*"}})
         buttons = []
-        for i, room_full_name in enumerate(ROOMS_DB):
+        for j, room_full_name in enumerate(ROOMS_DB):
             user_id = all_bookings[day][room_full_name]
             style = "primary"
-            label = ROOMS_DISPLAY[i]
+            label = ROOMS_DISPLAY[j]
             btn_text = label
             
             if user_id:
@@ -112,8 +151,8 @@ def get_dashboard_blocks():
                 first_name = get_user_name(user_id)
                 btn_text = f"{label} ({first_name})"
 
-            val = f"{day}|{i}"
-            unique_action_id = f"toggle_{day}_{i}"
+            val = f"{day}|{j}"
+            unique_action_id = f"toggle_{day}_{j}"
             
             buttons.append({
                 "type": "button",
@@ -131,21 +170,33 @@ def get_dashboard_blocks():
     })
     return blocks
 
+# --- AUTOMATION (SCHEDULER) ---
+def scheduled_reset_and_post():
+    """Runs every Friday to wipe DB and post new week"""
+    print("⏰ Auto-Reset Triggered!")
+    try:
+        # 1. Wipe DB
+        reset_db()
+        # 2. Post New Message
+        app.client.chat_postMessage(
+            channel=CHANNEL_ID,
+            text="<!here> Desk Booking is Open for Next Week!", # <!here> notifies everyone
+            blocks=get_dashboard_blocks()
+        )
+        print("✅ New week posted successfully.")
+    except Exception as e:
+        print(f"❌ Scheduler Error: {e}")
+
 # --- SLACK HANDLERS ---
 @app.command("/desk")
 def open_dashboard(ack, say, command):
     ack()
-    
-    # CHECK FOR "SECRET" RESET WORD
     user_text = command.get('text', '').lower().strip()
     
     if user_text == "new":
-        # 1. Wipe the database
         reset_db()
-        # 2. Tell the user (privately or publicly)
-        say("🗑️ *Database Wiped!* Starting a fresh week.")
+        say("🗑️ *Database Wiped manually!* Starting a fresh week.")
         
-    # 3. Show the dashboard (It will be empty if you typed 'new')
     say(blocks=get_dashboard_blocks(), text="Weekly Desk Dashboard")
 
 @app.action(re.compile("toggle_.*"))
@@ -179,6 +230,7 @@ def slack_events():
 def health():
     return "Dashboard Active", 200
 
+# INIT
 if __name__ != "__main__":
     try:
         conn = get_db_connection()
@@ -193,8 +245,16 @@ if __name__ != "__main__":
         """)
         conn.commit()
         conn.close()
+        
+        # START SCHEDULER
+        # day_of_week='fri', hour=14 means Friday at 2:00 PM (Server Time - usually UTC)
+        scheduler = BackgroundScheduler()
+        scheduler.add_job(scheduled_reset_and_post, 'cron', day_of_week='fri', hour=14, minute=0)
+        scheduler.start()
+        print("⏳ Scheduler Active: Will reset every Friday at 14:00 UTC")
+        
     except Exception as e:
-        print(f"DB Error: {e}")
+        print(f"Init Error: {e}")
 
 if __name__ == "__main__":
     flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))
