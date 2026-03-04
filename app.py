@@ -11,8 +11,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 # 1. PASTE YOUR CHANNEL ID HERE (Right-click channel -> Copy Link -> Ends in C0xxxx)
 CHANNEL_ID = "C07GV929YRF" 
 
-ROOMS_DISPLAY = ["Small 1", "Small 2", "Large 1", "Large 2", "Large 3", "Large 4"]
-ROOMS_DB = ["Small Room 1", "Small Room 2", "Large Room 1", "Large Room 2", "Large Room 3", "Large Room 4"]
+ROOMS_DISPLAY = ["Small 1", "Small 2", "Large 1", "Large 2", "Large 3", "Large 4", "Sebastian"]
+ROOMS_DB = ["Small Room 1", "Small Room 2", "Large Room 1", "Large Room 2", "Large Room 3", "Large Room 4", "Sebastian"]
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 
 # --- APP SETUP ---
